@@ -1,0 +1,74 @@
+name: Build iOS IPA
+
+on:
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Unpack project
+        run: |
+          ZIP=$(ls *.zip | head -1)
+          echo "Unpacking $ZIP"
+          unzip -o "$ZIP"
+          ls -la
+
+      - name: Rust toolchain (iOS)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build Rust core (static lib)
+        env:
+          IPHONEOS_DEPLOYMENT_TARGET: "15.0"
+        run: |
+          cargo rustc -p wave-core --lib --release --target aarch64-apple-ios --crate-type staticlib
+          rm -f target/aarch64-apple-ios/release/libwavenode.dylib
+          ls -la target/aarch64-apple-ios/release/ | grep wavenode
+
+      - name: Generate Xcode project
+        run: |
+          brew install xcodegen
+          cd ios && xcodegen generate
+
+      - name: Build app (unsigned)
+        run: |
+          set -o pipefail
+          xcodebuild -project ios/Wave.xcodeproj -scheme Wave -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build | tail -n 200
+
+      - name: Package IPA
+        run: |
+          rm -rf Payload Wave.ipa
+          mkdir Payload
+          cp -R build/Build/Products/Release-iphoneos/Wave.app Payload/
+          zip -qry Wave.ipa Payload
+          ls -la Wave.ipa
+          echo "VER=$(grep MARKETING_VERSION ios/project.yml | head -1 | sed 's/[^0-9.]//g')" >> $GITHUB_ENV
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Wave-${{ env.VER }}-ipa
+          path: Wave.ipa
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.VER }}-${{ github.run_number }}
+          name: Wave ${{ env.VER }} (build ${{ github.run_number }})
+          files: Wave.ipa
